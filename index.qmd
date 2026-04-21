@@ -1,0 +1,1506 @@
+---
+title: "Predicting Self-Harm in Adolescent TBI Patients: R code"
+subtitle: "For this project, I developed clinical prediction models to estimate the risk of self-harm following adolescent traumatic brain injury (TBI). This document outlines the key steps in the model development and internal validation, and has been prepared in accordance with [SAIL Databank's](https://saildatabank.com) output review policy. This document is addresses three goals:<br> 
+&nbsp;&nbsp;&nbsp;&nbsp;1. Data cleaning, preparation and testing model assumptions.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;2. Building the prediction model.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;3. Testing the model's predictive performance.<br>
+
+I want to acknowledge the use of code developed by Daniele Giardiello and colleagues (available [on Github](https://github.com/danielegiardiello/Prediction_performance_survival/blob/main/03_predsurv_extended.md)) which informed the development and internal validation of the prediction model. Additionally, code from Plana-Ripoll and colleagues ([available here](https://plana-ripoll.github.io/NB-COMO/)) was used guide data cleaning and preparation for the time-to-event analysis.
+"
+
+format:
+  lumo-html: 
+    #logo:  #optional: add your logo to the doc header
+    primary-color: "#b5cef7"
+    github-repo: "https://github.com/mayaogonah" 
+    self-contained: true
+    is-particlejs-enabled: true  # optional: display interactive particles in the doc header
+    #bg-image:  # optional: add a background image
+    code-fold: show
+
+execute:
+  eval: false
+  echo: true
+author: Maya Ogonah, University of Oxford
+date: today
+    
+---
+
+# Data preparation and testing assumptions {.tabset}
+
+## Libraries and data
+
+### Load necessary libraries
+
+```{r, r run_this_one3, eval = TRUE, waring = FALSE, message = FALSE, results='hide'}
+if (!require("pacman")) install.packages("pacman")
+
+library(pacman)
+pacman::p_load(
+  knitr,
+  DT,
+  formatR,
+  markdown,
+  gtools,
+  survival,
+  rms,
+  survminer,
+  riskRegression, 
+  timeROC,
+  plotrix,
+  rio,
+  boot,
+  rsample,
+  splines, 
+  kableExtra,
+  gridExtra,
+  modelsummary,
+  RODBC,
+  pec,
+  lubridate,
+  tidyverse,
+  devtools,
+  MASS, 
+  mfp,
+  reshape2, 
+  plyr,
+  muhaz, 
+  pmsampsize, 
+  cowplot
+  #SAILDBUtils    # this is a package specific to SAIL Databank
+)
+
+options(show.signif.stars = FALSE) # display statistical intelligence
+palette("Okabe-Ito") # colour-blind friendly
+``` 
+
+### Data and recoding
+
+Here I have loaded the linked dataset I created in DB2 (using SQL), before starting data cleaning.
+
+```{r, echo=FALSE}
+#load(file = "cohort_unclean.RData")
+
+# streamline data and rename columns for ease of interpretation
+cohort$FIRST_START_DATE <- ymd(cohort$FIRST_START_DATE)
+cohort$LAST_END_DATE <- ymd(cohort$LAST_END_DATE)
+
+data <- cohort %>%
+  dplyr::select(-starts_with("PEDW"), -contains("EDDS"), -starts_with("WLGP"), -starts_with("ADDE"), -contains("GP"), -contains("IP"), -CINW_CPR, -CRCS_CPR)
+
+colnames(data) <- c("alf", "start_date", "end_date", "person_time_days", "wob", "dod", "sex", "mtbi_flag", "mtbi_date", "modsevtbi_flag", "modsevtbi_date", "tbi_unspecified_flag", "tbi_unspecified_date", "tbi_life", "tbi_date", "age_at_tbi", "suicidality_life", "suicidality_date", "pretbi_suicidality", "victimisation_life", "victimisation_date", "pretbi_victimisation", "sud_life", "sud_date", "pretbi_sud", "smi_life", "smi_date", "depression_life", "depression_date", "anxiety_life", "anxiety_date", "psychiatric_life", "psychiatric_date", "pretbi_psychiatric", "adhd_life", "adhd_date", "pretbi_adhd", "autism_life", "autism_date", "pretbi_autism", "conduct_disorder_life", "conduct_disorder_date", "pretbi_conduct_disorder", "learning_difficulties_life", "learning_difficulties_date", "pretbi_learning_difficulties", "epilepsy_life", "epilepsy_date", "cerebral_palsy_life", "cerebral_palsy_date", "migraine_life", "migraine_date", "neurological_life", "neurological_date", "pretbi_neurological", "deprivation", "child_maltreatment_flag", "looked_after_life", "looked_after_date", "pretbi_looked_after")
+
+# create an age at TBI variable 
+data$age_at_tbi <- decimal_date(data$tbi_date) - decimal_date(data$wob)
+data$age_at_tbi <- as.numeric(data$age_at_tbi)
+
+# sample is restricted to those with a first TBI between age 10-24y
+data <- data %>%
+  filter(age_at_tbi >=10 & age_at_tbi <25)
+
+# those who experience a tbi after the end of gp coverage are removed
+right_cens <- data %>%
+  filter(tbi_date > end_date)
+
+data <- data %>%
+  anti_join(right_cens, data, by = "alf")
+
+# create a column for TBI severity
+# 'unspecified' TBI was deemed to be likely mild, and hence mild and unspecified TBIs were completed into the 'probable mild' category
+data <- data %>%
+  dplyr::mutate(tbi_severity = case_when(
+                  (tbi_date == mtbi_date) ~ "probable mild", 
+                  (tbi_date == modsevtbi_date) ~ "probable moderate-severe",
+                  (tbi_date == tbi_unspecified_date) ~ "probable mild" )
+  ) 
+
+# create a binary variable for TBI severity
+data <- data %>%
+  mutate(tbi_severity_binary = case_when(
+    tbi_severity == "probable mild" ~ 0,
+    tbi_severity == "probable moderate-severe" ~ 1
+  ))
+
+# recode sex for ease of interpretation (male = 1, female = 0)
+data <- data %>%
+  mutate(across(sex, as.numeric)) %>%
+  mutate(sex = replace(sex, sex ==1, 1)) %>%
+  mutate(sex = replace(sex, sex ==2, 0))
+
+# categorise age at baseline
+data$age_at_entry <- as.numeric(decimal_date(data$tbi_date) - decimal_date(data$wob))
+
+data$agebaseline <- cut(data$age_at_entry,
+                  breaks = c(-Inf, 14, 19, 25),
+                  labels = c("10-14", "15-19", "20-24"),
+                  right = FALSE)
+```
+
+### Left truncation
+
+For every individual follow-up started on the date of first TBI (index TBI).
+
+```{r}
+data <- data %>%
+  mutate(entry_date = tbi_date)
+
+data$entry_dd <- decimal_date(data$entry_date) # create decimal date for day of entry
+data$wob_dd <- decimal_date(data$wob) # create decimal date for week of birth
+data$age_at_entry <- data$entry_dd - data$wob_dd # create age at entry (decimal date)
+
+```
+
+### Right censoring
+
+For every person, follow-up ends on October 16 2023 (the last date of available data), end of GP registration, or death, whichever occurs first.
+
+```{r}
+data$last_date <- as.Date("2023-10-16")
+
+data$exit_date <- pmin(data[, "end_date"], data[, "dod"], data[, "last_date"], na.rm = TRUE)
+data$exit_dd <- decimal_date(data$exit) # create decimal date for date of exit
+data$age_at_exit <- data$exit_dd - data$wob_dd # create age of exit (decimal date)
+```
+
+### Removing those with negative or zero follow-up
+
+Individuals with exactly zero follow-up time were removed due to the computational constraints of the tmerge package, which requires time at risk to be over zero.
+
+:::{.callout}
+This exclusion criteria was made on the basis that the individuals with zero follow-up time (n = 10) comprised a negligible fraction of the cohort.<br>
+  
+  Albeit, if I were to repeat these analyses, rather than removing individuals with zero time at risk, I would add follow-up time (eg, from 0.0000 to 0.0001) in order to work around the tmerge() technological constraints.
+:::
+
+```{r}
+data <- data[data$entry_dd < data$exit_dd, ]
+```
+
+
+### Set outcome of interest
+
+Information on the outcome of interest is included at this stage. Variable `suicidality_date` contains the date of a diagnosis (defined using ICD-10 or Read Codes) of an injury purposely inflicted by another. Follow-up now needs to finish on the date of self-harm, for those with this outcome.
+
+```{r}
+outcome <- "suicidality_date"
+
+data$exit_date <- pmin(data$exit_date, data$suicidality_date, na.rm = TRUE)
+data$exit_dd <- decimal_date(data$exit_date) # create decimal date for date of exit
+data$age_at_exit <- data$exit_dd - data$wob_dd # create age of exit 
+
+data$victim_dd <- decimal_date(data$suicidality_date) # create decimal date for date of suicidality
+```
+
+### Break ties
+
+:::{.callout}
+In hindsight, this stage is unnecessary, as the washout period would remove these 'ties'.
+:::
+
+Create a table with all self-harm events.
+
+```{r, echo=FALSE}
+temp <- data
+
+# create a table with all suicidality dates
+pedw <- sqlQuery(channel, "select * from SAILW1478V.PEDW_VICTIM")
+wlgp <- sqlQuery(channel, "select * from SAILW1478V.WLGP_VICTIM")
+adde <- sqlQuery(channel, "select * from SAILW1478V.ADDE_VICTIM")
+
+pedw <- pedw %>%
+  dplyr::select("ALF_PE", "START_DATE", "DIAG_CD_1234")
+
+wlgp <- wlgp %>%
+  dplyr::select("ALF_PE", "EVENT_DT", "EVENT_CD")
+
+adde <- adde %>% 
+  dplyr::select("ALF_PE", "DEATH_DT", "DEATHCAUSE_DIAG_UNDERLYING_CD")
+
+colnames(pedw) <- c("alf", "date", "code")
+colnames(wlgp) <- c("alf", "date", "code")
+colnames(adde) <- c("alf", "date", "code")
+
+combined_data <- bind_rows(pedw, wlgp, adde)
+
+combined_data <- combined_data %>%
+  filter(!is.na(alf))
+
+final_table <- combined_data %>%
+  group_by(alf) %>%
+  dplyr::mutate(event_number = row_number()) %>%
+  ungroup
+
+final_table <- final_table %>%
+  pivot_wider(
+    id_cols = alf,
+    names_from = event_number, 
+    values_from = c(date, code),
+    names_glue = "event{event_number}_{.value}"
+  )
+
+final_table_long <- final_table %>%
+  pivot_longer(
+    cols = matches("date$"),
+    names_to = "event_type",
+    values_to = "event_date"
+  ) %>%
+  dplyr::select(-contains("code"))
+
+```
+
+Identify and break ties. 
+
+```{r}
+# identify ties
+ties <- temp %>%
+  filter(exit_dd - entry_dd == 0.000) %>%
+  dplyr::select(alf, start_date, end_date, tbi_date, suicidality_date, entry_date, exit_date)
+
+ties_joined <- ties %>%
+  left_join(final_table_long, by = "alf")
+
+ties_joined <- ties_joined %>%
+  filter(event_date > suicidality_date & event_date <= end_date)
+
+ties_joined <- ties_joined %>%
+  dplyr::group_by(alf) %>%
+  dplyr::summarize(second_suicidality_date = min(event_date, na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+# add the second suicidality date to the temp table
+temp <- temp %>%
+  left_join(ties_joined, by = "alf")
+
+# to break ties exclude outcome event, however, individuals remain at-risk during follow-up
+temp <- temp %>%
+  mutate(suicidality_date = case_when(
+    suicidality_date > entry_date ~ as.Date(suicidality_date),
+    suicidality_date <= entry_date ~ NA)
+  )
+```
+
+### Washout period
+
+Outcome events within 7 days of the index TBI were excluded in order to account for the acute post-injury phase, and reduce risk of reverse causation. Individuals with outcome events within the first 7 days of follow-up remained at risk, and subsequent self-harm events (after the removed incidence) were included.
+
+```{r, echo=FALSE}
+# add the next suicidality event during follow-up
+test <- temp %>%
+  filter(is.na(suicidality_date) & !is.na(second_suicidality_date)) %>%
+  dplyr::select(alf, dod, entry_date, end_date, tbi_date, tbi_life, suicidality_date, second_suicidality_date)
+```
+
+
+```{r}
+# add the next suicidality event during follow-up
+temp <- temp %>%
+  mutate(suicidality_date = if_else(
+    (between(as.numeric(difftime(suicidality_date, tbi_date, units = "days")), 0, 7)), NA, as.Date(suicidality_date))
+  )
+
+temp <- temp %>%
+  mutate(suicidality_date = case_when(is.na(suicidality_date) & (as.numeric(difftime(second_suicidality_date, tbi_date, units = "days")) > 7) ~ as.Date(second_suicidality_date), TRUE ~ suicidality_date))
+
+# update suicidality flag 
+temp <- temp %>%
+  mutate(suicidality_life = case_when(
+    is.na(suicidality_date) ~ 0,
+    !is.na(suicidality_date) ~1
+  ))
+
+temp <- temp %>%
+  mutate(victim_dd = decimal_date(data$suicidality_date))
+
+# update exit date
+temp <- temp %>%
+  mutate(exit_date = coalesce(end_date, dod, last_date))
+temp <- temp %>%
+  mutate(exit_date = coalesce(suicidality_date, exit_date))
+temp$exit_dd <- decimal_date(temp$exit_date) # create decimal date for date of exit
+temp$age_at_exit <- temp$exit_dd - temp$wob_dd
+```
+
+### Create a fail variable
+
+A variable `fail` was created to indicate the type of outcome at the end of follow-up. 0 = censored (they exit on the last date of the study period 16 Oct 2023); 1 = event; 80 = study exit wasn’t October 16 2023 (eg, emigration, end of GP coverage); 90 = death; 91 = death & diagnosis on the same day
+
+An outcome column was created, where when fail = 1 \| 91, outcome = 1.
+
+```{r}
+temp$fail <- (90 * (!is.na(temp$dod) & (temp$dod == temp$exit_date))) + 
+  (80 * (!is.na(temp$exit_date) & (temp$exit_date != temp$last_date) & is.na(temp$dod) & is.na(temp$suicidality_date))) +
+  (01 * (!is.na(temp$suicidality_date) & (temp$suicidality_date <= temp$exit_date)))
+
+table(temp$fail)
+
+temp <- temp %>%
+  mutate(outcome = if_else(fail == 1 | fail == 91, 1, 0))
+
+table(temp$outcome)
+```
+
+### Prepare for time-to-event analysis
+
+I created new variables: s_day, id, tstart, tstop, endpoint, and time. The tmerge() function, a time-based merge for time-to-event analysis, was used.
+
+```{r}
+temp2 <- temp %>%
+  mutate(s_day = entry_dd - entry_dd) %>%
+  mutate(follow_up = exit_dd - entry_dd)
+
+
+temp2 <- tmerge(temp2, temp2, id = alf, tstart = s_day, tstop = follow_up)
+temp2 <- tmerge(temp2, temp2, id = alf, endpoint = event(tstop, outcome))
+
+temp2 <-temp2 %>%
+  mutate(time = tstop - tstart)
+```
+
+### Finalise dataset and streamline to only include predictors
+
+Here I removed unnecessary columns before saving the dataset as `tbi_prognosis`.
+
+```{r, echo=FALSE}
+temp3 <- temp2 %>%
+  dplyr::select(-suicidality_life, -suicidality_date, -suicidality_life, -suicidality_date, sud_life, -sud_date, -psychiatric_life, -psychiatric_date, -adhd_life, -adhd_date, -autism_life, -autism_date, -conduct_disorder_life, -conduct_disorder_date, -learning_difficulties_life, -learning_difficulties_date, -neurological_life, -neurological_date, -child_maltreatment_flag, -looked_after_life, -looked_after_date)
+
+temp3 <- temp3 %>%
+  mutate(pretbi_neurodevelopmental = ifelse(pretbi_autism == 1 | pretbi_adhd == 1, 1, 0 ))
+
+tbi_prognosis <- temp3
+```
+
+### Check missing data
+
+Check the proportion of missingness for each candidate predictor / risk factor. 
+
+```{r}
+nrow(tbi_prognosis[is.na(tbi_prognosis$sex), ])
+nrow(tbi_prognosis[is.na(tbi_prognosis$deprivation), ])
+
+# continue for all variables
+```
+
+Only the deprivation variable had missing data, and the proportion missing was negligible. Therefore, complete-case analysis was conducted, and individuals with missing data (n =313) were removed.
+
+```{r}
+tbi_prognosis <- tbi_prognosis %>%
+  filter(!is.na(deprivation))
+```
+
+### Apply administrative censoring
+
+As I was interested in risk up to three years after the index TBI, administrative censoring was applied at 3 years; that is, the maximum follow-up time was set to 3 years.
+
+```{r}
+# censor the dataset at 3 years
+temp <- survSplit(Surv(time, endpoint) ~ ., data = tbi_prognosis, cut = 3, episode = "epoch")
+prognosis3 <- subset(temp, epoch == 1)
+```
+
+
+**SAIL Databank prohibits individual-level data from being publicly available, so an invented case is used here to show the data structure.**
+```{r, run_this_one, eval = TRUE, echo = FALSE}
+
+library(tibble)
+
+fakedata <- tibble(
+  alf = "invented_person", 
+  start_date = as.Date("2006-04-10"), 
+  end_date = as.Date("2023-10-16"), 
+  wob = as.Date("2006-04-02"),
+  dod = as.Date(NA),
+  sex = 1L, 
+  tbi_life = 1L, 
+  tbi_date = as.Date("202-04-02"),
+  age_at_tbi = 14.000, 
+  pretbi_suicidality = 0L, 
+  pretbi_victimisation = 1L, 
+  pretbi_sud = 0L, 
+  pretbi_psychiatric = 0L, 
+  pretbi_adhd = 1L, 
+  pretbi_autism = 0L, 
+  pretbi_neurodevelopmental = 1L, 
+  pretbi_conduct_disorder = 0L, 
+  pretbi_learning_difficulties = 0L, 
+  pretbi_neurological = 0L, 
+  deprivation = 3L, 
+  pretbi_severity = "probable mild", 
+  pretbi_severity_binary = 0L, 
+  age_at_entry = 14.000, 
+  agebaselin = "10-14", 
+  entry_date = as.Date("2020-04-02"), 
+  entry_dd = 2020.251, 
+  wob_dd = 2006.249, 
+  exit_date = as.Date("2022-09-11"), 
+  exit_dd = 2022.693, 
+  age_at_exit = 16.444, 
+  suicidality_date = as.Date("2022-09-11"), 
+  fail = 1,
+  outcome = 1,
+  s_day = 0,
+  follow_up = 2.445
+)
+```
+
+```{r run_this_one2, eval = TRUE, echo = FALSE}
+datatable(fakedata, 
+  options = list(
+    scrollX = TRUE,             # enables horizontal scroll
+    autoWidth = TRUE,           # adjusts column widths
+    pageLength = 10             # optional: rows per page
+  ),
+  class = 'display nowrap stripe'
+)
+```
+
+::: {.cell .page-columns .page-full .column-screen .grey-section}
+:::
+
+## Descriptive statistics
+
+### Create censoring and survival curves
+
+I first drew the survival and censoring curves in the development dataset.
+
+```{r}
+sfit_prognosis3 <- survfit(Surv(time, endpoint == 1) ~ 1, data = tbi_prognosis) # survival
+
+sfit_plot <- ggsurvplot(sfit_prognosis3,
+                        censor = FALSE,
+                        legend = "none",
+                        risk.table = TRUE,
+                        tables.theme = theme_cleantable()
+)
+
+smooth_plot <- sfit_plot$plot
+risk_table <- sfit_plot$risk.table
+smooth_plot$layers <- smooth_plot$layers[-1]
+
+plot_survival <- smooth_plot +  # smooth the plot
+  geom_smooth(method = "loess", 
+              span = 0.3, 
+              se = FALSE, 
+              alpha = 0.2, 
+              aes(color = strata),
+              linetype = "solid",
+              linewidth = 2, ) + 
+  scale_color_manual(values = "deeppink3") + 
+  labs(title = "Failure-free Survival",
+       x = 'Years',
+       y = 'Probability')
+
+sfit_prognosis3_c <- survfit(Surv(time, endpoint == 0) ~ 1, data = tbi_prognosis) # censoring 
+
+sfit_plot_c <- ggsurvplot(sfit_prognosis3_c,
+                          censor = FALSE,
+                          legend = "none",
+                          risk.table = TRUE,
+                          tables.theme = theme_cleantable()
+)
+
+smooth_plot_c <- sfit_plot_c$plot
+smooth_plot_c$layers <- smooth_plot_c$layers[-1]
+
+plot_censor <- smooth_plot_c +  # smooth the plot
+  geom_smooth(method = "loess", 
+              span = 0.3, 
+              se = FALSE, 
+              alpha = 0.2, 
+              aes(color = strata),
+              linetype = "solid",
+              linewidth = 2, ) + 
+  scale_color_manual(values = "darkseagreen") + 
+  labs(title = "Censoring",
+       x = 'Years',
+       y = 'Probability')
+
+plots <- cowplot::plot_grid(plot_survival, plot_censor, ncol = 2)
+```
+
+```{r}
+plots
+```
+
+Summarise follow-up. 
+
+```{r}
+summary(tbi_prognosis$follow_up)
+```
+
+
+### Summarising predictors
+
+I then summarised the binary variables in the dataset using the modelsummary package. 
+
+```{r}
+tbi_descriptive <- prognosis3 %>%
+  mutate(sex = ifelse(sex == 0, 'female', 'male'),
+         'history of victimisation' = ifelse(pretbi_victimisation == 1, 'yes', 'no'),
+         'history of self-harm' = ifelse(pretbi_suicidality == 1, 'yes', 'no'),
+         'conduct disorder' = ifelse(pretbi_conduct_disorder == 1, 'yes', 'no'),
+         'neurodevelopmental disorder' = ifelse(pretbi_neurodevelopmental == 1, 'yes', 'no'),
+         'learning difficulties' = ifelse(pretbi_learning_difficulties ==1, 'yes', 'no'),
+         'psychiatric condition' = ifelse(pretbi_psychiatric == 1, 'yes', 'no'),
+         'neurological condition' = ifelse(pretbi_neurological == 1, 'yes', 'no'),
+         'substance misuse' = ifelse(pretbi_sud == 1, 'yes', 'no'))%>%
+  dplyr::select(sex,
+                'history of victimisation',
+                'history of self-harm',
+                'conduct disorder', 
+                'neurodevelopmental disorder', 
+                'learning difficulties',
+                'substance misuse', 
+                'psychiatric condition',
+                'neurological condition',
+                tbi_severity)
+
+datasummary_skim(tbi_descriptive, output = "html")
+```
+
+Categorical variables were summarised in base R.
+
+```{r}
+table(prognosis3$deprivation)
+round(prop.table(table(prognosis3$deprivation))*100,0)
+table(prognosis3$agebaseline)
+round(prop.table(table(prognosis3$agebaseline))*100,0)
+```
+
+::: {.cell .page-columns .page-full .column-screen .grey-section}
+:::
+
+## Assessing model assumptions
+
+### Assess non-linearity
+
+The assumption of linearity for continuous variables was assessed using restricted cubic splines.
+
+```{r}
+agebaseline3_spline <- rcs(tbi_prognosis$age_at_entry,3)
+agebaseline4_spline <- rcs(tbi_prognosis$age_at_entry,4)
+agebaseline5_spline <- rcs(tbi_prognosis$age_at_entry,5)
+
+cox_baseline3 <- coxph(Surv(tstart,tstop, endpoint) ~ agebaseline3_spline, data = tbi_prognosis, ties = "breslow")
+lp_baseline3 <- predict (cox_baseline3)
+
+cox_baseline4 <- coxph(Surv(tstart,tstop, endpoint) ~ agebaseline4_spline, data = tbi_prognosis, ties = "breslow")
+lp_baseline4 <- predict (cox_baseline4)
+
+cox_baseline5 <- coxph(Surv(tstart,tstop, endpoint) ~ agebaseline5_spline, data = tbi_prognosis, ties = "breslow")
+lp_baseline5 <- predict (cox_baseline5)
+
+data_splines <- data.frame(tbi_prognosis$age_at_entry,lp_baseline3, lp_baseline4, lp_baseline5)
+data_splines_m <- melt(data_splines,id.vars = 'tbi_prognosis.age_at_entry')
+plot_splines <- ggplot(data_splines_m, aes(x=tbi_prognosis.age_at_entry, y=value, colour=variable)) + geom_line() + scale_colour_manual(labels = c("3 knots", "4 knots", "5 knots"), values = c("darkseagreen", 'cadetblue3', "deeppink3")) + theme_bw()
+plot_splines + labs(x = "Age at Baseline", y = "Linear prediction", color = "") + theme(legend.position.inside = c(0.8,0.2))
+```
+
+I calculated AIC and BIC to assess model fit.
+
+```{r}
+AIC(cox_baseline3) 
+BIC(cox_baseline3) 
+
+AIC(cox_baseline4) 
+BIC(cox_baseline4) 
+
+AIC(cox_baseline5) 
+BIC(cox_baseline5)
+```
+
+### Assess proportional hazards
+
+The assumption of proportional hazards was assessed through log(-log) plots
+
+```{r}
+fit <- survfit(Surv(tstart,tstop, endpoint)~sex, data = tbi_prognosis)
+surv_plot <- ggsurvplot(fit,
+                        fun = "cloglog",
+                        palette = c('cadetblue3', 'lightpink3'), 
+                        legend.labs = c("sex: male", "sex: female"),
+                        legend.title = "",
+                        legend = c(0.3,0.95),
+                        censor = FALSE
+)
+
+smooth_plot <- surv_plot$plot
+smooth_plot$layers <- smooth_plot$layers[-1]
+
+p1 <- smooth_plot +  # smooth the plot
+  geom_smooth(method = "loess", 
+              span = 0.3, 
+              se = FALSE, 
+              alpha = 0.2, 
+              aes(color = strata),
+              linetype = "solid",
+              linewidth = 2, ) + 
+  labs(
+    x = 'Time',
+    y = 'Log(-log(Survival Probability))')
+
+p1
+
+fit <- survfit(Surv(tstart,tstop, endpoint)~deprivation, data = tbi_prognosis)
+surv_plot <- ggsurvplot(fit,
+                        fun = "cloglog",
+                        palette = c('cadetblue3', "darkseagreen", "indianred4", "deeppink3", 'lightpink3'),
+                        legend.labs = c("WIMD 5: least deprived", "WIMD 4", "WIMD 3", "WIMD 2", "WIMD 1: most deprived"),
+                        legend.title = "",
+                        legend = c(0.3,0.90), 
+                        censor = FALSE
+)
+
+smooth_plot <- surv_plot$plot
+smooth_plot$layers <- smooth_plot$layers[-1]
+
+p2 <- smooth_plot + # smooth the plot
+  geom_smooth(method = "loess", 
+              span = 0.3, 
+              se = FALSE, 
+              alpha = 0.2, 
+              aes(color = strata),
+              linetype = "solid",
+              linewidth = 2, ) +
+  labs(
+    x = 'Time',
+    y = 'Log(-log(Survival Probability))')
+
+p2
+
+# complete for all variables then plot together  
+## combined_plot <- cowplot::plot_grid(p1, p2, ..., ncol = 3)
+```
+
+::: {.cell .page-columns .page-full .column-screen .grey-section}
+:::
+
+## Sample size calculation
+
+The minimum sample size was calculated using pmsampsize package. This package calculates the minimum sample size required for the development of a prognostic model using the criteria proposed by [Riley *et al*. (2018).](https://onlinelibrary.wiley.com/doi/full/10.1002/sim.7992)
+
+```{r}
+pmsampsize(type = "s", # type s as time to event outcome
+           nagrsquared = 0.15, # expected value of the Nagelkerke's R-squared of the new model [0,1 range]
+           csrsquared = NA, # expected value of the Cox-Snell R-squared of the new model
+           parameters = 16, # number of candidate predictor parameters (may be larger that the number of candidate predictors, as categorical and continuous predictors often require 2+ parameters to be estimated)
+           shrinkage = 0.9,
+           rate = 0.008, # overall event rate in the population of interest (i.e., cumulative incidence)
+           timepoint = 3, # timepoint of interest for prediction (must be same as given for meanfup option)
+           meanfup = 3 # specified the average (mean) follow-up anticipated
+)
+```
+
+::: {.cell .page-columns .page-full .column-screen .grey-section}
+:::
+
+# Model development {.tabset}
+
+## Cox proportional hazards model
+
+```{r}
+full_model <- coxph(Surv(time, endpoint) ~ sex + rcs(age_at_entry, 3) + deprivation + pretbi_victimisation + pretbi_suicidality + pretbi_conduct_disorder + pretbi_neurodevelopmental + pretbi_learning_difficulties + pretbi_psychiatric + pretbi_neurological + pretbi_sud + tbi_severity_binary, data = prognosis3, x = T, y = T)
+
+full_model
+```
+
+Calculate the HR for each predictor included in the multivariable model.
+
+```{r}
+result <- summary(full_model)
+
+summary_table <- data.frame(
+  HR = result$coefficients[, "exp(coef)"],
+  `Lower 95% CI` = result$conf.int[, "lower .95"],
+  `Upper 95% CI` = result$conf.int[, "upper .95"],
+  `p-value` = result$coefficients[, "Pr(>|z|)"]
+)
+
+summary_table <- round(summary_table, 4)
+
+datatable(summary_table, 
+  options = list(
+    scrollX = TRUE,             
+    autoWidth = TRUE,           
+    pageLength = 15             
+  ),
+  class = 'display nowrap stripe'
+)
+```
+
+## Model specification
+
+Calculate the beta estimates for each predictor.
+
+```{r}
+summary_fit <- summary(full_model)
+beta_estimates <- data.frame(
+  Beta = summary_fit$coef[, "coef"]
+)
+  
+beta_estimates <- round(beta_estimates, 3)
+
+datatable(beta_estimates, 
+  options = list(
+    scrollX = TRUE,             
+    autoWidth = TRUE,           
+    pageLength = 15             
+  ),
+  class = 'display nowrap stripe'
+)
+```
+
+Summarise the distribution of the linear predictor.
+
+```{r}
+# cox linear predictor (full model)
+lp_cox <- predict(full_model, type = "lp")
+prognosis3$lp <- predict(full_model, type = "lp")
+
+# summarise LP mean (SD) and range
+mean(lp_cox) 
+sd(lp_cox) 
+min(lp_cox) 
+max(lp_cox)
+```
+
+Estimate baseline survival / hazard at 1 year.
+
+```{r}
+# estimate baseline survival at 1 year
+y1_model <- summary(survfit(full_model), time = 1)$surv
+y1_model
+
+bh <- basehaz(full_model, centered = FALSE) # uncentered
+H0_t1 <- bh$hazard[bh$time == 1] # baseline hazard
+
+cat("Baseline hazard at 1 year:",
+    H0_t1, "\n")
+
+# calculate 1 year probabilities: S(t) = S(t)^exp(LP)
+y1_prob <- y1_model^exp(lp_cox)
+
+# subtract the survival probability from 1 to get the probability of experiencing the event
+y1_event_prob <- 1 - y1_prob
+mean(y1_event_prob) 
+sd(y1_event_prob) 
+min(y1_event_prob) 
+max(y1_event_prob) 
+```
+
+I created a dataset censored a 1 year to calculate the number of observed events 1 year post TBI.
+
+```{r}
+# censor the dataset at 1years
+temp <- survSplit(Surv(time, endpoint) ~ ., data = tbi_prognosis, cut = 1, episode = "epoch")
+prognosis1<- subset(temp, epoch == 1)
+
+# observed events
+observed_events <- sum(prognosis1$endpoint == 1)
+cat("Number of Observed Events: ", observed_events, "\n")
+```
+
+Estimate baseline survival / hazard at 3 years.
+
+```{r}
+# estimate baseline survival at 3 years
+y3_model <- summary(survfit(full_model), time = 3)$surv
+y3_model
+
+bh <- basehaz(full_model, centered = FALSE) # uncentered
+H0_t3 <- bh$hazard[bh$time == 3] # baseline hazard
+
+cat("Baseline hazard at 3 years:",
+    H0_t3, "\n")
+
+# calculate 3 year probabilities: S(t) = S(t)^exp(LP)
+y3_prob <- y3_model^exp(lp_cox)
+
+# subtract the survival probability from 1 to get the probability of experiencing the event
+y3_event_prob <- 1 - y3_prob
+mean(y3_event_prob) 
+sd(y3_event_prob) 
+min(y3_event_prob) 
+max(y3_event_prob) 
+
+observed_events <- sum(prognosis3$endpoint == 1)
+cat("Number of Observed Events: ", observed_events, "\n")
+```
+
+::: {.cell .page-columns .page-full .column-screen .grey-section}
+:::
+
+# Performance assessment {.tabset}
+
+The performance of the risk prediction model may be evaluated through (1) discrimination, (2) calibration, and (3) overall performance. Internal validation using bootstrapping optimism corrected cross validation was conducted using the function [‘internal_cv’](https://github.com/danielegiardiello/Prediction_performance_survival/blob/main/Functions/internal_cv.R) created by Daniele Giardiello.
+
+## Discrimination
+
+Discrimination is the ability to differentiate between patients who have the outcome (by a certain timepoint) and those who don't. Concordance can be assessed over several time windows: (a) a fixed window corresponding to the chosen time horizon, or (b) the entire range of data. 
+
+:::{.callout}
+For Harrell’s c-index, Uno’s c-index, and Uno’s AUC, values close to 1 indicate good discrimination ability, while values close to 0.5 indicated poor discrimination ability.
+:::
+
+### Fixed timepoint: 1 year
+
+Calculate **Uno’s time-dependent AUC** and 95% CIs to calculate discrimination at 1 year post TBI.
+
+```{r}
+calc_auc <- function(data, indices) {
+  
+  d <- data[indices, ] # this line is crucial
+  
+  # ensure no NA values in subset
+  if(any(is.na(d$time)) | any(is.na(d$endpoint)) || any(is.na(d$lp))) {
+    return(NA)
+  }
+  
+  uno_auc_prognosis1 <- tryCatch({
+    timeROC::timeROC(
+      T = d$time,
+      delta = d$endpoint,
+      marker = d$lp,
+      cause = 1, 
+      weighting = "marginal", 
+      times = 0.99
+    ) 
+  }, error = function(e) {
+    return(NA) # return NA if there is an error in timeROC
+  })
+  
+  if(is.null(uno_auc_prognosis1) || length(uno_auc_prognosis1$AUC) < 2) {return(NA)} # check if AUC is valid
+  
+  return(uno_auc_prognosis1$AUC[2]) # extract the AUC value
+}
+
+set.seed(123) # sets the random seed for reproducibility
+results <- boot(data = prognosis3, statistic = calc_auc, R = 500) # R = 500 bootstrapped samples
+
+summary(results)
+print(results$t) # not all values of t are the same, so bootstrap function is capturing variability
+
+## due to large sample size, standard error computation can be really long, therefore, I have used bootstrap percentile to calculate confidence intervals
+ci <- tryCatch({
+  boot.ci(results, type = "perc")
+}, error = function(e) {
+  print(e) # print error message if boot.ci fails
+  NULL
+})
+```
+
+Run [Daniele’s internal validation](https://github.com/danielegiardiello/Prediction_performance_survival/blob/main/Functions/internal_cv.R) function.
+```{r}
+int_val <- bootstrap_cv(db = prognosis3,
+                        B = 100, 
+                        time = "time", 
+                        status = "endpoint", 
+                        formula_model = "Surv(time, endpoint) ~ sex + rcs(age_at_entry, 3) + deprivation + pretbi_victimisation + pretbi_suicidality + pretbi_conduct_disorder + pretbi_neurodevelopmental + pretbi_learning_difficulties + pretbi_psychiatric + pretbi_neurological + pretbi_sud + tbi_severity_binary",
+                        formula_ipcw = "Surv(time, endpoint) ~ 1",
+                        pred.time = 0.99)
+```
+
+
+Calculate performance metrics for **Uno’s AUC** at development and internal validation.
+
+```{r}
+alpha <- .05
+k <- 2
+res_AUC <- matrix(c(
+  results$t0,
+  ci$percent[4],
+  ci$percent[5],
+  
+  int_val["AUC corrected", ],
+  NA,
+  NA
+), 
+
+nrow = 1, 
+ncol = 6, 
+byrow = T, 
+
+dimnames = list("AUROC", c("Apparent Estimate", "Lower .95", "Upper .95", "Internal Estimate", "Lower .95", "Upper .95"))
+)
+
+res_C <- round(res_AUC, 3) # Digits
+kable(res_C) |>
+  kable_styling("striped", position = "center")
+```
+
+
+### Fixed timepoint: 3 years
+
+Calculate **Uno’s time-dependent AUC** and 95% CIs to calculate discrimination at 3 years post TBI.
+
+```{r}
+calc_auc <- function(data, indices) {
+  
+  d <- data[indices, ] # this line is crucial
+  
+  # ensure no NA values in subset
+  if(any(is.na(d$time)) | any(is.na(d$endpoint)) || any(is.na(d$lp))) {
+    return(NA)
+  }
+  
+  uno_auc_prognosis3 <- tryCatch({
+    timeROC::timeROC(
+      T = d$time,
+      delta = d$endpoint,
+      marker = d$lp,
+      cause = 1, 
+      weighting = "marginal", 
+      times = 2.99
+    ) 
+  }, error = function(e) {
+    return(NA) # return NA if there is an error in timeROC
+  })
+  
+  if(is.null(uno_auc_prognosis3) || length(uno_auc_prognosis3$AUC) < 2) {return(NA)} # check if AUC is valid
+  
+  return(uno_auc_prognosis3$AUC[2]) # extract the AUC value
+}
+
+set.seed(123) # sets the random seed for reproducibility
+results <- boot(data = prognosis3, statistic = calc_auc, R = 500) # R = 500 bootstrapped samples
+
+summary(results)
+print(results$t) # not all values of t are the same, so bootstrap function is capturing variability
+
+## due to large sample size, standard error computation can be really long, therefore, I have used bootstrap percentile to calculate confidence intervals
+ci <- tryCatch({
+  boot.ci(results, type = "perc")
+}, error = function(e) {
+  print(e) # print error message if boot.ci fails
+  NULL
+})
+```
+
+Run [Daniele’s internal validation](https://github.com/danielegiardiello/Prediction_performance_survival/blob/main/Functions/internal_cv.R) function, this time for 3-year performance
+```{r}
+int_val3 <- bootstrap_cv(db = prognosis3,
+                        B = 100, 
+                        time = "time", 
+                        status = "endpoint", 
+                        formula_model = "Surv(time, endpoint) ~ sex + rcs(age_at_entry, 3) + deprivation + pretbi_victimisation + pretbi_suicidality + pretbi_conduct_disorder + pretbi_neurodevelopmental + pretbi_learning_difficulties + pretbi_psychiatric + pretbi_neurological + pretbi_sud + tbi_severity_binary",
+                        formula_ipcw = "Surv(time, endpoint) ~ 1",
+                        pred.time = 2.99)
+```
+
+Calculate performance metrics (at 3 years post-TBI) for **Uno’s AUC** at development and internal validation.
+
+```{r}
+alpha <- .05
+k <- 2
+res_AUC <- matrix(c(
+  results$t0,
+  ci$percent[4],
+  ci$percent[5],
+  
+  int_val3["AUC corrected", ],
+  NA,
+  NA
+), 
+
+nrow = 1, 
+ncol = 6, 
+byrow = T, 
+
+dimnames = list("AUROC", c("Apparent Estimate", "Lower .95", "Upper .95", "Internal Estimate", "Lower .95", "Upper .95"))
+)
+
+res_C <- round(res_AUC, 3) # Digits
+kable(res_C) |>
+  kable_styling("striped", position = "center")
+```
+
+
+### Time range
+
+Then calculate **Harrell’s c-index** and 95% CIs. This calculates the degree of concordance across the entire range of data.
+
+```{r}
+harrell_c_prognosis1 <- survival::concordance(Surv(time, endpoint) ~ lp, prognosis3, reverse = TRUE)
+
+harrell_c_prognosis1
+
+alpha <- 0.5
+
+harrell_c <- matrix(
+  c( harrell_c_prognosis1$concordance, 
+     harrell_c_prognosis1$concordance - 
+       qnorm(1 - alpha/2)*sqrt(harrell_c_prognosis1$var),
+     harrell_c_prognosis1$concordance + 
+       qnorm(1 - alpha/2) * sqrt(harrell_c_prognosis1$var)
+  ),
+  nrow = 1,
+  ncol = 3,
+  byrow = TRUE, 
+  dimnames = list("Harrell C", c("Estimate", "2.5%", "97.5%"))
+)
+```
+
+Calculate **Uno’s c-index** and 95% CI. This also calculates the degree of concordance across the entire range of data, however includes time dependent weighting that more fully adjusts for censoring.
+
+```{r}
+uno_c_prognosis1 <- survival::concordance(Surv(time, endpoint) ~ lp, prognosis3, reverse = TRUE, timewt = "n/G2") # timewt specifies weighting, n/G2 weights each pair by the inverse of the number of pairs at risk and is a common approach to handle ties and censoring 
+
+uno_c <- matrix(
+  c( uno_c_prognosis1$concordance, 
+     uno_c_prognosis1$concordance - 
+       qnorm(1 - alpha/2)*sqrt(uno_c_prognosis1$var),
+     uno_c_prognosis1$concordance + 
+       qnorm(1 - alpha/2) * sqrt(uno_c_prognosis1$var)
+  ),
+  nrow = 1,
+  ncol = 3,
+  byrow = TRUE, 
+  dimnames = list("Uno C", c("Estimate", "2.5%", "97.5%"))
+)
+```
+
+Calculate performance metrics for **Harrell’s and Uno’s c-indexes** at development and internal validation.
+
+```{r}
+alpha <- .05
+k <- 2
+res_C <- matrix(c(
+  harrell_c_prognosis1$concordance,
+  harrell_c_prognosis1$concordance - 
+    qnorm(1 - alpha / 2) * sqrt(harrell_c_prognosis1$var),
+  harrell_c_prognosis1$concordance + 
+    qnorm(1 - alpha / 2) * sqrt(harrell_c_prognosis1$var),
+  
+  int_val3["Harrell C corrected", ],
+  NA,
+  NA,
+  
+  
+  uno_c_prognosis1$concordance, 
+  uno_c_prognosis1$concordance -
+    qnorm(1 - alpha / 2) * sqrt(uno_c_prognosis1$var),
+  uno_c_prognosis1$concordance + 
+    qnorm(1 - alpha / 2) * sqrt(uno_c_prognosis1$var),
+  
+  int_val3["Uno C corrected", ],
+  NA, 
+  NA
+  
+),
+
+nrow = 2,
+ncol = 6, 
+byrow = T, 
+
+dimnames = list(
+  c("Harrell C", "Uno C"),
+  c("Apparent Estimate", "Lower .95", "Upper .95", "Internal Estimate", "Lower .95", "Upper .95")
+)
+)
+
+res_C <- round(res_C, 3) # Digits
+kable(res_C) |>
+  kable_styling("striped", position = "center")
+```
+
+::: {.cell .page-columns .page-full .column-screen .grey-section}
+:::
+
+## Calibration
+
+### Fixed timepoint: 1 year
+
+**Moderate calibration** in the development sample was calculated by plotting the observed event rates against the predicted risks.
+
+:::{.callout}
+The 45 degree line indicates overall good calibration. Points below the 45 degree line indicate that the model overestimates the observed risk, whereas points above the 45 degree line indicate that the model underestimates the observed risk.
+:::
+
+```{r}
+prognosis3$pred <- riskRegression::predictRisk(full_model,
+                                          newdata = prognosis3,
+                                          times = 0.99)
+prognosis3$pred.cll <- log(-log(1 - prognosis3$pred))
+
+
+# estimate actual risk
+vcal <- rms::cph(Surv(time, endpoint) ~ rcs(pred.cll, 3),
+                 x = T,
+                 y = T,
+                 surv = T,
+                 data = prognosis3
+) 
+
+
+
+dat_cal <- cbind.data.frame(
+  "obs" = 1 - rms::survest(vcal,
+                           times = 0.99,
+                           newdata = prognosis3)$surv,
+  
+  "lower" = 1 - rms::survest(vcal,
+                             times = 0.99,
+                             newdata = prognosis3)$upper,
+  
+  "upper" = 1 - rms::survest(vcal,
+                             times = 0.99,
+                             newdata = prognosis3)$lower,
+  "pred" = prognosis3$pred
+  
+)
+
+
+# flexible calibration curve
+dat_cal <- dat_cal[order(dat_cal$pred), ]
+
+par(xaxs = "i", yaxs = "i", las = 1)
+plot(
+  dat_cal$pred, 
+  dat_cal$obs,
+  type = "l", 
+  lty = 1, 
+  xlim = c(0, 0.15),
+  ylim = c(0, 0.15), 
+  lwd = 2,
+  xlab = "Predicted risk from developed model",
+  ylab = "Predicted risk from refitted model", bty = "n"
+)
+lines(dat_cal$pred, 
+      dat_cal$lower, 
+      type = "l", 
+      lty = 2, 
+      lwd = 2)
+lines(dat_cal$pred, 
+      dat_cal$upper,
+      type = "l", 
+      lty = 2, 
+      lwd = 2)
+abline(0, 1, lwd = 2, lty = 2, col = 2)
+legend("bottomright",
+        c("Ideal calibration",
+          "Calibration curve based on secondary Cox model",
+          "95% confidence interval"),
+        col = c(2, 1, 1),
+        lty = c(2, 1, 2),
+        lwd = c(2, 2, 2),
+        bty = "n",
+        cex = 0.85)
+title("Apparent moderate calibration at 1y")
+```
+
+### Fixed timepoint: 3 years
+
+**Moderate calibration** in the development sample at 3 y was also calculated.
+
+```{r}
+prognosis3$pred <- riskRegression::predictRisk(full_model,
+                                          newdata = prognosis3,
+                                          times = 2.99)
+prognosis3$pred.cll <- log(-log(1 - prognosis3$pred))
+
+
+# estimate actual risk
+vcal <- rms::cph(Surv(time, endpoint) ~ rcs(pred.cll, 3),
+                 x = T,
+                 y = T,
+                 surv = T,
+                 data = prognosis3
+) 
+
+
+
+dat_cal3 <- cbind.data.frame(
+  "obs" = 1 - rms::survest(vcal,
+                           times = 2.99,
+                           newdata = prognosis3)$surv,
+  
+  "lower" = 1 - rms::survest(vcal,
+                             times = 2.99,
+                             newdata = prognosis3)$upper,
+  
+  "upper" = 1 - rms::survest(vcal,
+                             times = 2.99,
+                             newdata = prognosis3)$lower,
+  "pred" = prognosis3$pred
+  
+)
+
+
+# flexible calibration curve
+dat_cal3 <- dat_cal3[order(dat_cal3$pred), ]
+
+par(xaxs = "i", yaxs = "i", las = 1)
+plot(
+  dat_cal3$pred, 
+  dat_cal3$obs,
+  type = "l", 
+  lty = 1, 
+  xlim = c(0, 0.3),
+  ylim = c(0, 0.3), 
+  lwd = 2,
+  xlab = "Predicted risk from developed model",
+  ylab = "Predicted risk from refitted model", bty = "n"
+)
+lines(dat_cal3$pred, 
+      dat_cal3$lower, 
+      type = "l", 
+      lty = 2, 
+      lwd = 2)
+lines(dat_cal3$pred, 
+      dat_cal3$upper,
+      type = "l", 
+      lty = 2, 
+      lwd = 2)
+abline(0, 1, lwd = 2, lty = 2, col = 2)
+legend("bottomright",
+        c("Ideal calibration",
+          "Calibration curve based on secondary Cox model",
+          "95% confidence interval"),
+        col = c(2, 1, 1),
+        lty = c(2, 1, 2),
+        lwd = c(2, 2, 2),
+        bty = "n",
+        cex = 0.85)
+title("Apparent moderate calibration at 3y")
+
+```
+
+
+### Time range
+
+Calibration across the full range of data was calculated using the approach proposed by [Crowson *et al.*](https://journals.sagepub.com/doi/10.1177/0962280213497434) (which utilises Poisson regression).
+
+**Mean calibration** (or calibration-in-the-large) observes whether the observed outcome rate is equal to the average predicted risk.
+
+:::{.callout}
+If the mean calibration is close to 1 with a narrow CI, this indicates robust calibration. <br> A calibration slope < 1 indicates overestimated risks, while > 1 suggests underestimated risk.
+:::
+  
+```{r}
+p <- predict(full_model, newdata = prognosis3, type = "expected")
+
+pfit1 <- glm(endpoint ~ offset(log(p)),
+             family = poisson, 
+             data = prognosis3, 
+             subset = (p > 0))
+
+int_summary <- summary(pfit1)$coefficients
+```
+
+```{r}
+alpha <- 0.5
+res_mean_cal <- matrix(c(
+  
+  exp(int_summary[1]), 
+  exp(int_summary[1]) - qnorm(1 - alpha / 2) * int_summary[2], 
+  exp(int_summary[1]) + qnorm(1 - alpha / 2) * int_summary[2],
+  
+  int_val3["Mean calibration corrected - time range", ],
+  NA, 
+  NA
+),
+nrow = 1, 
+ncol = 6, 
+byrow = T,
+dimnames = list("Mean calibration (time range)", c("Apparent Estimate", "Lower .95", "Upper .95", "Internal Estimate", "Lower .95", "Upper .95"))
+)
+
+res_mean_cal <- round(res_mean_cal, 3) # Digits
+kable(res_mean_cal) |>
+  kable_styling("striped", position = "center")
+```
+
+The **calibration slope** assess global over or under prediction across the time range (weak calibration).
+```{r}
+p <- predict(full_model, newdata = prognosis3, type = "expected")
+lp1 <- predict(full_model, newdata = prognosis3, type = "lp") # linear predict
+
+logbase <-  log(p) - lp1
+
+pfit <- glm(endpoint ~ lp1 + offset(logbase),
+            family = poisson, 
+            data = prognosis3,
+            subset = (p > 0))
+
+slope_summary <- summary(pfit)$coefficients
+```
+
+```{r}
+alpha <- 0.05
+res_weak_cal <- matrix(c(
+  slope_summary[2, 1],
+  slope_summary[2, 1] - qnorm(1 - alpha / 2) * slope_summary[2, 2],
+  slope_summary[2, 1] + qnorm(1 - alpha / 2) * slope_summary[2, 2], 
+  
+  int_val3["Weak calibration corrected (slope) - time range", ],
+  NA, 
+  NA
+),  
+nrow = 1, 
+ncol = 6, 
+byrow = T,
+
+dimnames = list("Calibration slope (time range)", c("Apparent Estimate", "Lower .95", "Upper .95", "Internal Estimate", "Lower .95", "Upper .95"))
+
+)
+
+res_weak_cal <- round(res_weak_cal, 3) # Digits
+kable(res_weak_cal) |>
+  kable_styling("striped", position = "center")
+```
+
+::: {.cell .page-columns .page-full .column-screen .grey-section}
+:::
+
+## Overall performance
+
+The **Brier score** and the **Scaled Brier score** were used to assess overall model performance at 1 and 3 years post TBI.
+
+:::{.callout}
+The lower the brier score the better the model's overall performance. <br> A higher percentage for the scaled Brier score illustrates better model performance: 100% reflecting a perfect model, =0 a useless model, and <0 a harmful model.
+:::
+
+### Fixed timepoint: 1 year
+
+```{r}
+# brier score
+score_prognosis1 <- riskRegression::Score(list("cox" = full_model),
+                                          formula = Surv(time, endpoint) ~ 1,
+                                          data = prognosis3,
+                                          conf.int = TRUE, 
+                                          times = 0.99,
+                                          cens.model = "km", 
+                                          metrics = "brier", 
+                                          summary = "ipa"
+)
+
+score_prognosis1$Brier$score
+
+# bootstrap for the scaled brier score to provide more robust estimates
+B <- 500 # computational time is too long when the number of bootstrap replications is high
+set.seed(1234)
+prognosis1_boot <- rsample::bootstraps(prognosis3, times = B)
+
+score_boot <- function(split) {
+  riskRegression::Score(list("model" = full_model),
+                        formula = Surv(time, endpoint) ~ 1,
+                        data = analysis(split),
+                        conf.int = FALSE, 
+                        times = 0.99, 
+                        cens.model = "km", 
+                        metrics = "brier", 
+                        summary = "ipa"
+  )$Brier$score[model == "model"][["IPA"]]
+}
+
+prognosis1_boot <- prognosis1_boot |> mutate(
+  IPA= map_dbl(splits, score_boot)
+)
+```
+
+```{r}
+alpha <- .05
+
+res_ov <- matrix(unlist(c(
+  score_prognosis1$Brier$score[model == "cox"][["Brier"]],
+  score_prognosis1$Brier$score[model == "cox"][["lower"]],
+  score_prognosis1$Brier$score[model == "cox"][["upper"]],
+  
+  int_val["Brier corrected", ], 
+  NA, 
+  NA, 
+  
+  score_prognosis1$Brier$score[model == "cox"][["IPA"]],
+  quantile(prognosis1_boot$IPA, probs = alpha /2),
+  quantile(prognosis1_boot$IPA, probs = 1 - alpha /2),
+  
+  int_val["IPA corrected", ],
+  NA, 
+  NA 
+)),
+nrow = 2, 
+ncol = 6,
+byrow = T, 
+dimnames = list(
+  c("Brier", "IPA"),
+  c("Apparent Estimate", "Lower .95", "Upper .95", "Internal Estimate", "Lower .95", "Upper .95")
+))
+
+res_ov <- round(res_ov, 3)
+res_ov <- round(res_ov, 3) # Digits
+kable(res_ov) |>
+  kable_styling("striped", position = "center")
+```
+
+### Fixed timepoint: 3 years
+
+```{r}
+# brier score
+score_prognosis3 <- riskRegression::Score(list("cox" = full_model),
+                                          formula = Surv(time, endpoint) ~ 1,
+                                          data = prognosis3,
+                                          conf.int = TRUE, 
+                                          times = 2.99,
+                                          cens.model = "km", 
+                                          metrics = "brier", 
+                                          summary = "ipa"
+)
+
+score_prognosis3$Brier$score
+
+# bootstrap for the scaled brier score to provide more robust estimates
+B <- 500 # computational time is too long when the number of bootstrap replications is high
+set.seed(1234)
+prognosis3_boot <- rsample::bootstraps(prognosis3, times = B)
+
+score_boot <- function(split) {
+  riskRegression::Score(list("model" = full_model),
+                        formula = Surv(time, endpoint) ~ 1,
+                        data = analysis(split),
+                        conf.int = FALSE, 
+                        times = 2.99, 
+                        cens.model = "km", 
+                        metrics = "brier", 
+                        summary = "ipa"
+  )$Brier$score[model == "model"][["IPA"]]
+}
+
+prognosis3_boot <- prognosis3_boot |> mutate(
+  IPA= map_dbl(splits, score_boot)
+)
+```
+
+```{r}
+alpha <- .05
+
+res_ov <- matrix(unlist(c(
+  score_prognosis3$Brier$score[model == "cox"][["Brier"]],
+  score_prognosis3$Brier$score[model == "cox"][["lower"]],
+  score_prognosis3$Brier$score[model == "cox"][["upper"]],
+  
+  int_val3["Brier corrected", ], 
+  NA, 
+  NA, 
+  
+  score_prognosis3$Brier$score[model == "cox"][["IPA"]],
+  quantile(prognosis3_boot$IPA, probs = alpha /2),
+  quantile(prognosis3_boot$IPA, probs = 1 - alpha /2),
+  
+  int_val3["IPA corrected", ],
+  NA, 
+  NA 
+)),
+nrow = 2, 
+ncol = 6,
+byrow = T, 
+dimnames = list(
+  c("Brier", "IPA"),
+  c("Apparent Estimate", "Lower .95", "Upper .95", "Internal Estimate", "Lower .95", "Upper .95")
+))
+
+res_ov <- round(res_ov, 3)
+res_ov <- round(res_ov, 3) # Digits
+kable(res_ov) |>
+  kable_styling("striped", position = "center")
+```
+
