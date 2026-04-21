@@ -179,7 +179,7 @@ data <- data[data$entry_dd < data$exit_dd, ]
 
 ### Set outcome of interest
 
-Information on the outcome of interest is included at this stage. Variable `suicidality_date` contains the date of a diagnosis (defined using ICD-10 or Read Codes) of an injury purposely inflicted by another. Follow-up now needs to finish on the date of self-harm, for those with this outcome.
+Information on the outcome of interest is included at this stage. Variable `suicidality_date` contains the date of a diagnosis (defined using ICD-10 or Read Codes) of intentional self-injury or self-poisoning, irrespective of suicidal intent or motivation. Follow-up now needs to finish on the date of self-harm, for those with this outcome.
 
 ```{r}
 outcome <- "suicidality_date"
@@ -414,8 +414,8 @@ fakedata <- tibble(
   tbi_life = 1L, 
   tbi_date = as.Date("202-04-02"),
   age_at_tbi = 14.000, 
-  pretbi_suicidality = 0L, 
-  pretbi_victimisation = 1L, 
+  pretbi_suicidality = 1L, 
+  pretbi_victimisation = 0L, 
   pretbi_sud = 0L, 
   pretbi_psychiatric = 0L, 
   pretbi_adhd = 1L, 
@@ -699,7 +699,7 @@ pmsampsize(type = "s", # type s as time to event outcome
 ## Cox proportional hazards model
 
 ```{r}
-full_model <- coxph(Surv(time, endpoint) ~ sex + rcs(age_at_entry, 3) + deprivation + pretbi_victimisation + pretbi_suicidality + pretbi_conduct_disorder + pretbi_neurodevelopmental + pretbi_learning_difficulties + pretbi_psychiatric + pretbi_neurological + pretbi_sud + tbi_severity_binary, data = prognosis3, x = T, y = T)
+full_model <- coxph(Surv(time, endpoint) ~ sex + rcs(age_at_entry, 4) + deprivation + pretbi_victimisation + pretbi_suicidality + pretbi_conduct_disorder + pretbi_neurodevelopmental + pretbi_learning_difficulties + pretbi_psychiatric + pretbi_neurological + pretbi_sud + tbi_severity_binary, data = prognosis3, x = T, y = T)
 
 full_model
 ```
@@ -895,7 +895,7 @@ int_val <- bootstrap_cv(db = prognosis3,
                         B = 100, 
                         time = "time", 
                         status = "endpoint", 
-                        formula_model = "Surv(time, endpoint) ~ sex + rcs(age_at_entry, 3) + deprivation + pretbi_victimisation + pretbi_suicidality + pretbi_conduct_disorder + pretbi_neurodevelopmental + pretbi_learning_difficulties + pretbi_psychiatric + pretbi_neurological + pretbi_sud + tbi_severity_binary",
+                        formula_model = "Surv(time, endpoint) ~ sex + rcs(age_at_entry, 4) + deprivation + pretbi_victimisation + pretbi_suicidality + pretbi_conduct_disorder + pretbi_neurodevelopmental + pretbi_learning_difficulties + pretbi_psychiatric + pretbi_neurological + pretbi_sud + tbi_severity_binary",
                         formula_ipcw = "Surv(time, endpoint) ~ 1",
                         pred.time = 0.99)
 ```
@@ -982,7 +982,7 @@ int_val3 <- bootstrap_cv(db = prognosis3,
                         B = 100, 
                         time = "time", 
                         status = "endpoint", 
-                        formula_model = "Surv(time, endpoint) ~ sex + rcs(age_at_entry, 3) + deprivation + pretbi_victimisation + pretbi_suicidality + pretbi_conduct_disorder + pretbi_neurodevelopmental + pretbi_learning_difficulties + pretbi_psychiatric + pretbi_neurological + pretbi_sud + tbi_severity_binary",
+                        formula_model = "Surv(time, endpoint) ~ sex + rcs(age_at_entry, 4) + deprivation + pretbi_victimisation + pretbi_suicidality + pretbi_conduct_disorder + pretbi_neurodevelopmental + pretbi_learning_difficulties + pretbi_psychiatric + pretbi_neurological + pretbi_sud + tbi_severity_binary",
                         formula_ipcw = "Surv(time, endpoint) ~ 1",
                         pred.time = 2.99)
 ```
