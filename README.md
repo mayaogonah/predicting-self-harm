@@ -1,6 +1,6 @@
-# Clinical prediction model for self-harm after adolescent traumatic brain injury
+# A clinical prediction model for self-harm after adolescent traumatic brain injury
 
-R/Quarto repository for the manuscript 'Clinical prediction model for self-harm after adolescent traumatic brain injury' published in The Journal of Neuropsychiatry and Clinical Neurosciences. 
+R/Quarto repository for the manuscript 'A clinical prediction model for self-harm after adolescent traumatic brain injury' published in The Journal of Neuropsychiatry and Clinical Neurosciences. 
 
 **Journal article is available [here](https://psychiatryonline.org/doi/abs/10.1176/appi.neuropsych.20260042).**
 
