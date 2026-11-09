@@ -1,6 +1,8 @@
 # Clinical prediction model for self-harm after adolescent traumatic brain injury
 
-R/Quarto repository for the manuscript 'Clinical prediction model for self-harm after adolescent traumatic brain injury' which is currently under peer review.
+R/Quarto repository for the manuscript 'Clinical prediction model for self-harm after adolescent traumatic brain injury' published in The Journal of Neuropsychiatry and Clinical Neurosciences. 
+
+**Journal article is available [here](https://psychiatryonline.org/doi/abs/10.1176/appi.neuropsych.20260042).**
 
 The reposity contains the code to develop and internally vadliate a prediction for self-harm following adolescent traumatic brain injury. [The HTML file](https://mayaogonah.github.io/predicting-self-harm) rendered from Quarto, outlines the key stages of analysis.
 
